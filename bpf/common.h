@@ -28,13 +28,40 @@
 #define TCP_ESTABLISHED  1
 #define TCP_CLOSE_WAIT   8
 
-struct packet_t {
+struct retr_packet_t {
     struct in_addr src_ip;
     struct in_addr dst_ip;
     __be16 src_port;
     __be16 dst_port;
     __be32 seq; 
     __be32 ack_seq;
-    __u8 tcp_flags;
-    uint64_t ts;
+    __s32 ret;
 };
+
+struct tc_packet_t {
+    struct in_addr src_ip;
+    struct in_addr dst_ip;
+    __be16 src_port;
+    __be16 dst_port;
+    __u8 protocol;
+    __u8 ttl;
+    __be32 seq; 
+    __be32 ack_seq;
+};
+
+struct packet_key_t {
+    struct in_addr src_ip;
+    struct in_addr dst_ip;
+    __be16 src_port;
+    __be16 dst_port;
+    __be32 seq; 
+    __be32 pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct packet_key_t);
+    __type(value, __u8);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} retr_packet_map SEC(".maps");

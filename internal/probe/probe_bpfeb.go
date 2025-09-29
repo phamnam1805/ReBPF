@@ -8,9 +8,26 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type probePacketKeyT struct {
+	_     structs.HostLayout
+	SrcIp struct {
+		_      structs.HostLayout
+		S_addr uint32
+	}
+	DstIp struct {
+		_      structs.HostLayout
+		S_addr uint32
+	}
+	SrcPort uint16
+	DstPort uint16
+	Seq     uint32
+	Pad     uint32
+}
 
 // loadProbe returns the embedded CollectionSpec for probe.
 func loadProbe() (*ebpf.CollectionSpec, error) {
@@ -54,14 +71,16 @@ type probeSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type probeProgramSpecs struct {
-	FentryTcpTransmitSkb   *ebpf.ProgramSpec `ebpf:"fentry__tcp_transmit_skb"`
+	DropRetransmit         *ebpf.ProgramSpec `ebpf:"drop_retransmit"`
 	FentryTcpRetransmitSkb *ebpf.ProgramSpec `ebpf:"fentry_tcp_retransmit_skb"`
+	FexitTcpRetransmitSkb  *ebpf.ProgramSpec `ebpf:"fexit_tcp_retransmit_skb"`
 }
 
 // probeMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type probeMapSpecs struct {
+	RetrPacketMap  *ebpf.MapSpec `ebpf:"retr_packet_map"`
 	RetransmitPipe *ebpf.MapSpec `ebpf:"retransmit_pipe"`
 	TransmitPipe   *ebpf.MapSpec `ebpf:"transmit_pipe"`
 }
@@ -94,12 +113,14 @@ func (o *probeObjects) Close() error {
 //
 // It can be passed to loadProbeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type probeMaps struct {
+	RetrPacketMap  *ebpf.Map `ebpf:"retr_packet_map"`
 	RetransmitPipe *ebpf.Map `ebpf:"retransmit_pipe"`
 	TransmitPipe   *ebpf.Map `ebpf:"transmit_pipe"`
 }
 
 func (m *probeMaps) Close() error {
 	return _ProbeClose(
+		m.RetrPacketMap,
 		m.RetransmitPipe,
 		m.TransmitPipe,
 	)
@@ -117,14 +138,16 @@ type probeVariables struct {
 //
 // It can be passed to loadProbeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type probePrograms struct {
-	FentryTcpTransmitSkb   *ebpf.Program `ebpf:"fentry__tcp_transmit_skb"`
+	DropRetransmit         *ebpf.Program `ebpf:"drop_retransmit"`
 	FentryTcpRetransmitSkb *ebpf.Program `ebpf:"fentry_tcp_retransmit_skb"`
+	FexitTcpRetransmitSkb  *ebpf.Program `ebpf:"fexit_tcp_retransmit_skb"`
 }
 
 func (p *probePrograms) Close() error {
 	return _ProbeClose(
-		p.FentryTcpTransmitSkb,
+		p.DropRetransmit,
 		p.FentryTcpRetransmitSkb,
+		p.FexitTcpRetransmitSkb,
 	)
 }
 

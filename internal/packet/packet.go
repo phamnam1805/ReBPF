@@ -13,8 +13,7 @@ type Packet struct {
     DstPort   uint16
     Seq       uint32
     AckSeq    uint32
-	TcpFlags  uint8
-    TimeStamp uint64
+	Ret       int32
 }
 
 func UnmarshalBinary(in []byte) (Packet, bool) {
@@ -37,8 +36,7 @@ func UnmarshalBinary(in []byte) (Packet, bool) {
         DstPort:   binary.BigEndian.Uint16(in[10:12]),
         Seq:       binary.BigEndian.Uint32(in[12:16]),
         AckSeq:    binary.BigEndian.Uint32(in[16:20]),
-        TcpFlags:  in[20],
-        TimeStamp: binary.LittleEndian.Uint64(in[24:32]),
+        Ret:       int32(binary.LittleEndian.Uint32(in[20:24])),
     }, true
 }
 
@@ -71,22 +69,24 @@ func UnmarshalBinary(in []byte) (Packet, bool) {
 func PrintPacketInfo(pkt Packet, packetType int) {
 
 	if(packetType == 0){
-		colorCyan("src: %v:%-7v\tdst: %v:%-9v\tSeq: %-4v\tAckSeq: %-4v\n",
+		colorCyan("src: %v:%-7v\tdst: %v:%-9v\tSeq: %-4v\tAckSeq: %-4v\t Ret: %d\n",
 				pkt.SrcIP.Unmap().String(),
 				pkt.SrcPort,
 				pkt.DstIP.Unmap().String(),
 				pkt.DstPort,
 				pkt.Seq,
 				pkt.AckSeq,
+				pkt.Ret,
 		)
 	} else {
-		colorLightYellow("src: %v:%-7v\tdst: %v:%-9v\tSeq: %-4v\tAckSeq: %-4v\n",
+		colorLightYellow("src: %v:%-7v\tdst: %v:%-9v\tSeq: %-4v\tAckSeq: %-4v Ret: %d\n",
 				pkt.SrcIP.Unmap().String(),
 				pkt.SrcPort,
 				pkt.DstIP.Unmap().String(),
 				pkt.DstPort,
 				pkt.Seq,
 				pkt.AckSeq,
+				pkt.Ret,
 		)
 	}
 	

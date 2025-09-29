@@ -4,7 +4,7 @@ generate:
 build-rebpf: 
 	go build -ldflags "-s -w" -o rebpf cmd/rebpf.go 
 
-build: generate build-tcp-retransmit-filter
+build: generate build-rebpf
 
 clean:
 	rm -f rebpf

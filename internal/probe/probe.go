@@ -8,11 +8,14 @@ import (
 	"net"
 	"fmt"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
 	"ReBPF/internal/packet"
+	"ReBPF/clsact"
 )
 
 //go:generate env GOPACKAGE=probe go run github.com/cilium/ebpf/cmd/bpf2go probe ../../bpf/rebpf.bpf.c -- -O2
@@ -22,9 +25,13 @@ const twentyMegaBytes = tenMegaBytes * 2
 const fortyMegaBytes = twentyMegaBytes * 2
 
 type probe struct {
+	iface netlink.Link
+	handle     *netlink.Handle
+	qdisc      *clsact.ClsAct
+	filters    []*netlink.BpfFilter
 	bpfObjects *probeObjects
-	tcpRetransmitLink      link.Link
-	tcpTransmitLink      link.Link
+	fentryTcpRetransmitLink      link.Link
+	fexitTcpRetransmitLink      link.Link
 }
 
 func htons(hostOrder uint16) uint16 {
@@ -66,7 +73,11 @@ func (p *probe) loadObjects() error {
 
 	objs := probeObjects{}
 
-	if err := loadProbeObjects(&objs, nil); err != nil {
+	if err := loadProbeObjects(&objs, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions {
+			PinPath: "/sys/fs/bpf",
+		},
+	}); err != nil {
 		return err
 	}
 
@@ -75,30 +86,101 @@ func (p *probe) loadObjects() error {
 	return nil
 }
 
+func (p *probe) createQdisc() error {
+	log.Printf("Creating clsact qdisc")
+
+	p.qdisc = clsact.NewClsAct(&netlink.QdiscAttrs{
+		LinkIndex: p.iface.Attrs().Index,
+		Handle:    netlink.MakeHandle(0xffff, 0),
+		Parent:    netlink.HANDLE_CLSACT,
+	})
+
+	if err := p.handle.QdiscAdd(p.qdisc); err != nil {
+		if err := p.handle.QdiscReplace(p.qdisc); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *probe) createFilters() error {
+	log.Printf("Creating qdisc ingress/egress filters")
+
+	addFilter := func(attrs netlink.FilterAttrs) {
+		p.filters = append(p.filters, &netlink.BpfFilter{
+			FilterAttrs:  attrs,
+			Fd:           p.bpfObjects.probePrograms.DropRetransmit.FD(),
+			DirectAction: true,
+		})
+	}
+
+	addFilter(netlink.FilterAttrs{
+		LinkIndex: p.iface.Attrs().Index,
+		Handle:    netlink.MakeHandle(0xffff, 0),
+		Parent:    netlink.HANDLE_MIN_INGRESS,
+		Protocol:  unix.ETH_P_IP,
+	})
+
+	addFilter(netlink.FilterAttrs{
+		LinkIndex: p.iface.Attrs().Index,
+		Handle:    netlink.MakeHandle(0xffff, 0),
+		Parent:    netlink.HANDLE_MIN_EGRESS,
+		Protocol:  unix.ETH_P_IP,
+	})
+
+	// addFilter(netlink.FilterAttrs{
+	// 	LinkIndex: p.iface.Attrs().Index,
+	// 	Handle:    netlink.MakeHandle(0xffff, 0),
+	// 	Parent:    netlink.HANDLE_MIN_INGRESS,
+	// 	Protocol:  unix.ETH_P_IPV6,
+	// })
+
+	// addFilter(netlink.FilterAttrs{
+	// 	LinkIndex: p.iface.Attrs().Index,
+	// 	Handle:    netlink.MakeHandle(0xffff, 0),
+	// 	Parent:    netlink.HANDLE_MIN_EGRESS,
+	// 	Protocol:  unix.ETH_P_IPV6,
+	// })
+
+	for _, filter := range p.filters {
+		if err := p.handle.FilterAdd(filter); err != nil {
+			if err := p.handle.FilterReplace(filter); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+
+
 func (p *probe) attachPrograms() error {
 	log.Printf("Attaching bpf programs to kernel")
+	
 
-	tcpRetransmitLink, err := link.AttachTracing(link.TracingOptions{
+	fentryTcpRetransmitLink, err := link.AttachTracing(link.TracingOptions{
         Program: p.bpfObjects.FentryTcpRetransmitSkb,
     })
     if err != nil {
         log.Printf("Failed to attach fentry/tcp_retransmit_skb: %v", err)
         return err
     }
-    p.tcpRetransmitLink = tcpRetransmitLink
+    p.fentryTcpRetransmitLink = fentryTcpRetransmitLink
 
 	log.Printf("Successfully attached to fentry/tcp_retransmit_skb")
 
-    tcpTransmitLink, err := link.AttachTracing(link.TracingOptions{
-        Program: p.bpfObjects.FentryTcpTransmitSkb,
+	fexitTcpRetransmitLink, err := link.AttachTracing(link.TracingOptions{
+        Program: p.bpfObjects.FexitTcpRetransmitSkb,
     })
-	if err != nil {
-        log.Printf("Failed to attach fentry/__tcp_transmit_skb: %v", err)
+    if err != nil {
+        log.Printf("Failed to attach fexit/tcp_retransmit_skb: %v", err)
         return err
     }
-    p.tcpTransmitLink = tcpTransmitLink
+    p.fexitTcpRetransmitLink = fexitTcpRetransmitLink
 
-	log.Printf("Successfully attached to fentry/__tcp_transmit_skb")
+	log.Printf("Successfully attached to fexit/tcp_retransmit_skb")
 
 	targetIP := "172.17.0.2"    // Change to your target IP
     targetPort := 5201          // Change to your target port
@@ -121,13 +203,33 @@ func (p *probe) attachPrograms() error {
 	return nil
 }
 
-func newProbe() (*probe, error) {
+func newProbe(iface netlink.Link) (*probe, error) {
 	log.Println("Creating a new probe")
 
-	prbe := probe{}
+	handle, err := netlink.NewHandle(unix.NETLINK_ROUTE)
+	if err != nil {
+		log.Printf("Failed getting netlink handle: %v", err)
+		return nil, err
+	}
+
+
+	prbe := probe{
+		iface:  iface,
+		handle: handle,
+	}
 
 	if err := prbe.loadObjects(); err != nil {
 		log.Printf("Failed loading probe objects: %v", err)
+		return nil, err
+	}
+
+	if err := prbe.createQdisc(); err != nil {
+		log.Printf("Failed creating qdisc: %v", err)
+		return nil, err
+	}
+
+	if err := prbe.createFilters(); err != nil {
+		log.Printf("Failed creating qdisc filters: %v", err)
 		return nil, err
 	}
 
@@ -143,13 +245,31 @@ func newProbe() (*probe, error) {
 func (p *probe) Close() error {
 	log.Println("Closing eBPF object")
 	
-	if p.tcpRetransmitLink != nil {
-        p.tcpRetransmitLink.Close()
+	if p.fentryTcpRetransmitLink != nil {
+        p.fentryTcpRetransmitLink.Close()
     }
 
-	if p.tcpTransmitLink != nil {
-        p.tcpTransmitLink.Close()
+	if p.fexitTcpRetransmitLink != nil {
+        p.fexitTcpRetransmitLink.Close()
     }
+
+	log.Println("Removing qdisc")
+	if err := p.handle.QdiscDel(p.qdisc); err != nil {
+		log.Println("Failed deleting qdisc")
+		return err
+	}
+
+	log.Println("Removing qdisc filters")
+
+	for _, filter := range p.filters {
+		if err := p.handle.FilterDel(filter); err != nil {
+			log.Println("Failed deleting qdisc filters")
+			return err
+		}
+	}
+
+	log.Println("Deleting handle")
+	p.handle.Delete()
 
 	if err := p.bpfObjects.Close(); err != nil {
 		log.Println("Failed closing eBPF object")
@@ -167,10 +287,14 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	probe, err := newProbe()
-
+	iface, err := netlink.LinkByName("docker0")
 	if err != nil {
-		return err
+		log.Printf("Failed linking iface by name: %v", err)
+	}
+
+	probe, err := newProbe(iface)
+	if err != nil {
+		log.Printf("Failed creating new probe: %v", err)
 	}
 	
 	retransmitPipe := probe.bpfObjects.probeMaps.RetransmitPipe
@@ -180,14 +304,6 @@ func Run(ctx context.Context) error {
 		log.Fatalf("opening ringbuf reader: %s", err)
 	}
 	defer retransmitReader.Close()
-
-	transmitPipe := probe.bpfObjects.probeMaps.TransmitPipe
-
-	transmitReader, err := ringbuf.NewReader(transmitPipe)
-	if err != nil {
-		log.Fatalf("opening ringbuf reader: %s", err)
-	}
-	defer transmitReader.Close()
 
 	retransmitCount := 0
 
@@ -215,35 +331,8 @@ func Run(ctx context.Context) error {
         }
     }()
 
-    
-	transmitCount := 0
-
-	go func() {
-        for {
-            event, err := transmitReader.Read()
-            if err != nil {
-                if ctx.Err() != nil {
-                    return 
-                }
-                log.Printf("Failed reading from transmit ringbuf: %v", err)
-                continue
-            }
-
-            transmitCount++
-            
-			packetAttrs, ok := packet.UnmarshalBinary(event.RawSample)
-			if !ok {
-				log.Printf("Could not unmarshall transmit packet: %+v", event.RawSample)
-				continue
-			}
-			// packet.PrintPacketInfo(packetAttrs, 1)
-			_ = packetAttrs
-        }
-    }()
-
 	<-ctx.Done()
     log.Println("Context cancelled, shutting down...")
 	log.Printf("Retransmit goroutine stopped. Total: %d", retransmitCount)
-	log.Printf("Transmit goroutine stopped. Total: %d", transmitCount)
     return probe.Close()
 }

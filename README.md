@@ -1,38 +1,62 @@
-# ReBPF - eBPF TCP Packet Monitor
+# ReBPF - eBPF TCP Retransmission Monitor & Drop Analyzer
 
-A high-performance network monitoring tool that uses eBPF to hook into kernel TCP transmission and retransmission events, providing real-time packet analysis and filtering capabilities.
+An advanced eBPF-based tool that hooks into kernel TCP retransmission events to analyze packet drop behavior and correlate retransmission outcomes with Traffic Control (TC) filtering decisions.
 
 ## Overview
 
-ReBPF leverages eBPF (Extended Berkeley Packet Filter) technology to monitor TCP traffic at the kernel level without adding significant overhead. The tool hooks into critical TCP kernel functions to capture both normal transmissions and retransmissions, then streams the data to userspace for analysis.
+ReBPF implements a sophisticated three-point hooking system using eBPF to monitor and analyze TCP packet retransmissions. The program tracks packet identifiers at retransmission entry, attempts selective dropping via Traffic Control, and captures the actual retransmission results to determine how TC drop decisions affect kernel return codes.
 
 ## Architecture
 
 ```
-┌───────────────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
-│   Kernel Space            │    │    Ring Buffer   │    │   Userspace         │
-│                           │    │                  │    │                     │
-│ fentry/tcp_transmit_skb   │───▶│  transmit_pipe   │───▶│  Go Application     │
-│ fentry/tcp_retransmit_skb │───▶│ retransmit_pipe  │───▶│  (probe.go)         │
-│                           │    │                  │    │                     │
-└───────────────────────────┘    └──────────────────┘    └─────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Kernel Space                                   │
+│                                                                             │
+│  ┌─────────────────────┐    ┌──────────────────┐    ┌─────────────────────┐ │
+│  │fentry/              │    │       TC         │    │fexit/               │ │
+│  │tcp_retransmit_skb   │    │   (Egress)       │    │tcp_retransmit_skb   │ │
+│  │                     │    │                  │    │                     │ │
+│  │1. Capture packet ID │───▶│2. Find packet &  │───▶│3. Get return value  │ │
+│  │   & identifiers     │    │   decide:        │    │   from kernel func  │ │
+│  │                     │    │   TC_ACT_OK or   │    │                     │ │
+│  │                     │    │   TC_ACT_SHOT    │    │                     │ │
+│  └─────────────────────┘    └──────────────────┘    └─────────────────────┘ │
+│             │                         │                         │           │
+└─────────────┼─────────────────────────┼─────────────────────────┼───────────┘
+              │                         │                         │
+              │                         │                         │
+      ┌───────────────────────────────────────────────────────────────────────┐
+      │                         Ring Buffer                                   │
+      │                    (retransmit events)                                │
+      └───────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+              ┌─────────────────────────────────────────────────────────────┐
+              │                    Userspace                                │
+              │                  Go Application                             │
+              │                                                             │
+              │  • Read ring buffer events                                  │
+              │  • Correlate fentry/fexit data                              │
+              │  • Print TC drop decision impact on return codes            │
+              └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Components
 
-- **eBPF Programs**: Hook into `fentry/tcp_transmit_skb` and `fentry/tcp_retransmit_skb`
-- **Ring Buffers**: High-performance kernel-to-userspace data transfer
-- **Go Userspace**: Real-time packet processing and filtering
-- **Configurable Filters**: Target specific IPs and ports
+- **fentry/tcp_retransmit_skb**: Captures packet identifiers before retransmission attempt
+- **TC (Traffic Control)**: Searches for target packets and makes drop/pass decisions
+- **fexit/tcp_retransmit_skb**: Retrieves the actual return value from the kernel function
+- **Ring Buffer**: High-performance communication channel for event data
+- **Go Userspace**: Correlates events and analyzes the impact of TC decisions on return codes
 
 ## Features
 
-- ✅ **Real-time TCP monitoring** with minimal overhead
-- ✅ **Separate tracking** of transmissions vs retransmissions  
-- ✅ **Configurable filtering** by IP address and port
-- ✅ **High-performance** ring buffer communication
-- ✅ **Detailed packet information** including sequence numbers, flags, timestamps
-- ✅ **Graceful shutdown** with proper resource cleanup
+- ✅ **Three-point hooking system** - fentry/tcp_retransmit_skb, TC, fexit/tcp_retransmit_skb
+- ✅ **Packet identification tracking** - Records packet identifiers at retransmission entry
+- ✅ **Traffic Control integration** - Finds and selectively drops packets at TC layer
+- ✅ **Return code analysis** - Correlates TC drop decisions with kernel function return values
+- ✅ **Ring buffer communication** - Efficient kernel-to-userspace event streaming
+- ✅ **Real-time monitoring** - Live analysis of retransmission behavior and drop impacts
 
 ## Prerequisites
 
@@ -56,6 +80,7 @@ make build-rebpf
 ## Usage
 
 ### Basic Usage
+
 ```bash
 sudo ./rebpf
 ```
@@ -82,6 +107,13 @@ func (p *probe) attachPrograms() error {
 }
 ```
 
+The program monitors TCP retransmissions and correlates TC drop decisions with kernel return codes. When running, you'll see output showing:
+
+- Packet identifiers captured at fentry/tcp_retransmit_skb
+- TC drop decisions (TC_ACT_OK or TC_ACT_SHOT)
+- Corresponding return codes from fexit/tcp_retransmit_skb
+- Analysis of how TC drops affect retransmission outcomes
+
 ## Project Structure
 
 ```
@@ -104,23 +136,18 @@ ReBPF/
 
 ### Testing with Traffic Generation
 
-Generate test traffic using iperf3:
 ```bash
 # Terminal 1: Start ReBPF
 sudo ./rebpf
 
-# Terminal 2: Generate TCP traffic
+# Terminal 2: Generate traffic with packet loss to trigger retransmissions
 iperf3 -s -p 5201 &
-iperf3 -c 127.0.0.1 -p 5201 -t 10
-```
 
-### Simulate Packet Loss
-```bash
-# Add packet loss to trigger retransmissions
-sudo tc qdisc add dev lo root netem loss 1%
+# Add network conditions to force retransmissions
+sudo tc qdisc add dev lo root netem loss 2% delay 100ms
 
-# Clean up
-sudo tc qdisc del dev lo root
+# Generate TCP traffic
+iperf3 -c 127.0.0.1 -p 5201 -t 30
 ```
 
 ### Debugging
@@ -137,30 +164,33 @@ sudo dmesg | tail -10
 
 ## How It Works
 
-### eBPF Hooks
+### Three-Point Hooking Strategy
 
-1. **fentry/tcp_transmit_skb**: Captures all outgoing TCP packets
-2. **fentry/tcp_retransmit_skb**: Captures TCP retransmission events
+1. **fentry/tcp_retransmit_skb**: Records packet identification information before retransmission
+2. **TC (Traffic Control)**: Intercepts packets and makes drop/pass decisions (TC_ACT_OK vs TC_ACT_SHOT)
+3. **fexit/tcp_retransmit_skb**: Captures the actual return value from the kernel function
 
 ### Data Flow
 
-1. eBPF programs filter packets based on configured IP/port
-2. Matching packets are serialized and sent via ring buffer
-3. Go userspace reads from ring buffer using separate goroutines  
-4. Packet information is parsed and displayed in real-time
+1. **Entry Hook**: When `tcp_retransmit_skb` is called, the fentry hook captures packet identifiers
+2. **TC Processing**: Traffic Control layer searches for the identified packet and decides whether to drop it
+3. **Exit Hook**: The fexit hook retrieves the return value from `tcp_retransmit_skb`
+4. **Event Correlation**: Ring buffer events are sent to userspace for analysis
+5. **Result Analysis**: Go application correlates the TC decision with the actual kernel return code
 
-### Filtering
+### Drop Decision Analysis
 
-The tool supports filtering by:
-- **Destination IP address**: Target specific hosts
-- **Destination port**: Monitor specific services
-- **Protocol**: Currently focuses on TCP traffic
+The program reveals the relationship between:
+- **TC Drop Actions**: When TC returns `TC_ACT_SHOT` (drop) vs `TC_ACT_OK` (pass)
+- **Kernel Return Codes**: The actual return value from `tcp_retransmit_skb` 
+- **Retransmission Outcomes**: Understanding how TC drops affect the retransmission process
 
 ## Performance
 
-- **Minimal overhead**: eBPF runs in kernel space with near-zero latency
-- **High throughput**: Ring buffers provide efficient data transfer
-- **Scalable**: Can handle high-volume traffic scenarios
+- **Low overhead monitoring**: eBPF hooks operate with minimal performance impact
+- **Efficient event correlation**: Ring buffers enable fast fentry/fexit event matching
+- **Real-time analysis**: Immediate correlation of TC decisions with kernel return codes
+- **Selective targeting**: Focuses only on retransmission events, reducing noise
 
 ## Contributing
 
@@ -200,5 +230,5 @@ sudo netstat -tuln | grep 5201
 ## Acknowledgments
 
 - Built with [cilium/ebpf](https://github.com/cilium/ebpf) Go library
-- Inspired by modern network observability tools
-- Thanks to the eBPF community for excellent
+- Inspired by modern network observability and kernel analysis tools
+- Thanks to the eBPF community for excellent documentation and examples
