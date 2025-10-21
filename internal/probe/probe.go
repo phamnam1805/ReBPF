@@ -110,7 +110,7 @@ func (p *probe) createFilters() error {
 	addFilter := func(attrs netlink.FilterAttrs) {
 		p.filters = append(p.filters, &netlink.BpfFilter{
 			FilterAttrs:  attrs,
-			Fd:           p.bpfObjects.probePrograms.DropRetransmit.FD(),
+			Fd:           p.bpfObjects.probePrograms.RedirectToLoopback.FD(),
 			DirectAction: true,
 		})
 	}

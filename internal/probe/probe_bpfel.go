@@ -74,6 +74,7 @@ type probeProgramSpecs struct {
 	DropRetransmit         *ebpf.ProgramSpec `ebpf:"drop_retransmit"`
 	FentryTcpRetransmitSkb *ebpf.ProgramSpec `ebpf:"fentry_tcp_retransmit_skb"`
 	FexitTcpRetransmitSkb  *ebpf.ProgramSpec `ebpf:"fexit_tcp_retransmit_skb"`
+	RedirectToLoopback     *ebpf.ProgramSpec `ebpf:"redirect_to_loopback"`
 }
 
 // probeMapSpecs contains maps before they are loaded into the kernel.
@@ -141,6 +142,7 @@ type probePrograms struct {
 	DropRetransmit         *ebpf.Program `ebpf:"drop_retransmit"`
 	FentryTcpRetransmitSkb *ebpf.Program `ebpf:"fentry_tcp_retransmit_skb"`
 	FexitTcpRetransmitSkb  *ebpf.Program `ebpf:"fexit_tcp_retransmit_skb"`
+	RedirectToLoopback     *ebpf.Program `ebpf:"redirect_to_loopback"`
 }
 
 func (p *probePrograms) Close() error {
@@ -148,6 +150,7 @@ func (p *probePrograms) Close() error {
 		p.DropRetransmit,
 		p.FentryTcpRetransmitSkb,
 		p.FexitTcpRetransmitSkb,
+		p.RedirectToLoopback,
 	)
 }
 

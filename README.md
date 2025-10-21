@@ -232,3 +232,39 @@ sudo netstat -tuln | grep 5201
 - Built with [cilium/ebpf](https://github.com/cilium/ebpf) Go library
 - Inspired by modern network observability and kernel analysis tools
 - Thanks to the eBPF community for excellent documentation and examples
+
+## Redirect to loopback (optional)
+
+The eBPF program `rebpf.bpf.c` also contains an optional `redirect_to_loopback` TC program that can be used to redirect matching packets to the loopback interface. This is useful for forcing selected packets back onto `lo` for inspection (for example, with `tcpdump`) without modifying the application or network namespace configuration.
+
+Key details:
+
+- `redirect_to_loopback` runs in the `tc` (Traffic Control) context and rewrites the destination MAC/address as needed for the loopback device, then uses `bpf_redirect()` to send the packet to the target interface index.
+- The TC program updates the destination MAC on the packet (so the kernel will accept/route it on the loopback device) and issues `bpf_redirect(ifindex, 0)` to redirect the skb to the interface with the specified ifindex.
+- To discover the numeric ifindex of the destination (loopback) interface you can use the small helper program `get_ifindex.c` included in the repository; it prints the ifindex for a given interface name.
+
+How to use it:
+
+1. Build and load the eBPF objects as usual (`make generate`) and start the Go userspace program.
+2. In userspace (`internal/probe/probe.go`), attach the `RedirectToLoopback` program instead of `DropRetransmit` if you want to enable redirection. Concretely, replace the DropRetransmit attach call with the RedirectToLoopback attach (the generated Go objects expose the TC program name). For example:
+
+```go
+// attach RedirectToLoopback TC program instead of DropRetransmit
+redirectLink, err := link.AttachTC(link.TCOptions{ /* attach options to clsact/egress or ingress */ Program: probe.bpfObjects.RedirectToLoopback })
+if err != nil {
+    log.Printf("failed to attach RedirectToLoopback: %v", err)
+    return err
+}
+probe.redirectLink = redirectLink
+```
+
+3. Once the program is attached and the redirect is enabled, you can observe redirected packets on the loopback interface with `tcpdump`:
+
+```bash
+sudo tcpdump -i lo -n port 5201
+```
+
+Notes and caveats:
+
+- Redirecting packets to `lo` may require adjusting the packet's MAC and/or network headers depending on kernel expectations; `redirect_to_loopback` handles the MAC rewrite before calling `bpf_redirect()`.
+- Attaching `RedirectToLoopback` is an alternative to dropping packets at TC time — it allows you to inspect the exact packets that would have been dropped by redirecting them to the loopback interface instead.

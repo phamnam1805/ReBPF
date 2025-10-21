@@ -240,7 +240,72 @@ int drop_retransmit(struct __sk_buff *skb) {
     __u8 *found = bpf_map_lookup_elem(&retr_packet_map, &pkt_key);
     if (found) {
         bpf_printk("Found retr packet at tc, this packet will be dropped");
-        return TC_ACT_SHOT;
+        return TC_ACT_STOLEN;
+        // return TC_ACT_OK;
+    }
+
+    return TC_ACT_OK;
+}
+
+
+SEC("tc")
+int redirect_to_loopback(struct __sk_buff *skb) {
+
+    if (bpf_skb_pull_data(skb, 0) < 0) {
+        return TC_ACT_OK;
+    }
+
+    if (skb->pkt_type == PACKET_BROADCAST || skb->pkt_type == PACKET_MULTICAST) {
+        return TC_ACT_OK;
+    }
+
+    void* head = (void*)(long)skb->data;     // Start of the packet data
+    void* tail = (void*)(long)skb->data_end; // End of the packet data
+
+    if (head + sizeof(struct ethhdr) > tail) { // Not an Ethernet frame
+        return TC_ACT_OK;
+    }
+
+    struct tc_packet_t pkt = { 0 };
+
+    uint32_t offset = 0;
+
+    if (handle_ip_packet(head, tail, &offset, &pkt) == TC_ACT_OK) {
+        return TC_ACT_OK;
+    }
+
+    if (head + offset + sizeof(struct tcphdr) > tail || head + offset + sizeof(struct udphdr) > tail) {
+        return TC_ACT_OK;
+    }
+
+    if (handle_ip_segment(head, tail, &offset, &pkt) == TC_ACT_OK) {
+        return TC_ACT_OK;
+    }
+
+    if (pkt.dst_port != match_port || pkt.dst_ip.s_addr != bpf_ntohl(match_ip)){
+        return TC_ACT_OK; 
+    }
+
+    struct packet_key_t pkt_key = { 0 };
+    pkt_key.src_ip = pkt.src_ip;
+    pkt_key.src_port = pkt.src_port;
+    pkt_key.dst_ip = pkt.dst_ip;
+    pkt_key.dst_port = pkt.dst_port;
+    pkt_key.seq = pkt.seq;
+    // bpf_printk("at tc, seq=%u, ack_seq=%u", pkt_key.seq);
+    __u8 *found = bpf_map_lookup_elem(&retr_packet_map, &pkt_key);
+    if (found) {
+        bpf_printk("Found retr packet at tc, this packet will be redirected to loopback interface");
+        struct ethhdr *eth;
+        eth = head;
+        eth->h_dest[0] = 0x00;
+        eth->h_dest[1] = 0x00;
+        eth->h_dest[2] = 0x00;
+        eth->h_dest[3] = 0x00;
+        eth->h_dest[4] = 0x00;
+        eth->h_dest[5] = 0x00;
+        int ret = bpf_redirect(1, 0);
+        return ret;
         // return TC_ACT_OK;
     }
 
