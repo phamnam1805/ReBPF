@@ -268,3 +268,8 @@ Notes and caveats:
 
 - Redirecting packets to `lo` may require adjusting the packet's MAC and/or network headers depending on kernel expectations; `redirect_to_loopback` handles the MAC rewrite before calling `bpf_redirect()`.
 - Attaching `RedirectToLoopback` is an alternative to dropping packets at TC time — it allows you to inspect the exact packets that would have been dropped by redirecting them to the loopback interface instead.
+
+
+## License
+
+MIT
